@@ -10,6 +10,7 @@ from PIL import Image
 import logging
 import json
 from typing import Optional
+from qwen_corrector import get_corrector, release_corrector, RELEASE_AFTER_USE
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -107,7 +108,8 @@ async def health_check():
 @app.post("/ocr")
 async def process_ocr(
     file: UploadFile = File(...),
-    languages: Optional[str] = Form(None)
+    languages: Optional[str] = Form(None),
+    ai_correct: Optional[str] = Form("false")
 ):
     """
     Process uploaded image with CRAFT + EasyOCR
@@ -115,6 +117,7 @@ async def process_ocr(
     Args:
         file: Image file (jpg, png, etc.)
         languages: JSON string of language codes (e.g., '["th", "en"]')
+        ai_correct: Enable AI correction with Qwen model ("true" or "false")
 
     Returns:
         JSON with detected text and bounding boxes
@@ -182,14 +185,33 @@ async def process_ocr(
                     })
             
             combined_text = " ".join(all_text)
-            
+
+            # Apply AI correction if requested (fallback mode)
+            ai_corrected_fallback = False
+            if ai_correct and ai_correct.lower() == "true":
+                try:
+                    logger.info("Applying AI correction with Qwen (fallback mode)...")
+                    corrector = get_corrector()
+                    primary_lang = "thai" if "th" in lang_list else "english"
+                    correction_result = corrector.correct(combined_text, language=primary_lang)
+
+                    if correction_result["success"]:
+                        combined_text = correction_result["corrected_text"]
+                        ai_corrected_fallback = True
+                except Exception as e:
+                    logger.error(f"AI correction error (fallback): {str(e)}")
+                finally:
+                    if RELEASE_AFTER_USE:
+                        release_corrector()
+
             return JSONResponse({
                 "success": True,
                 "text": combined_text,
                 "total_regions": len(detailed_results),
                 "recognized_regions": len(detailed_results),
                 "details": detailed_results,
-                "mode": "fallback_easyocr_only"
+                "mode": "fallback_easyocr_only",
+                "ai_corrected": ai_corrected_fallback
             })
         
         boxes = prediction_result["boxes"]
@@ -273,12 +295,43 @@ async def process_ocr(
 
         logger.info(f"OCR completed. Total text blocks: {len(detailed_results)}")
 
+        # Apply AI correction if requested
+        ai_corrected = False
+        if ai_correct and ai_correct.lower() == "true":
+            try:
+                logger.info("Applying AI correction with Qwen...")
+                corrector = get_corrector()
+
+                # Determine primary language
+                primary_lang = "thai" if "th" in lang_list else "english"
+
+                # Correct the combined text
+                correction_result = corrector.correct(
+                    combined_text,
+                    language=primary_lang
+                )
+
+                if correction_result["success"]:
+                    combined_text = correction_result["corrected_text"]
+                    ai_corrected = True
+                    logger.info("AI correction completed successfully")
+                else:
+                    logger.warning(f"AI correction failed: {correction_result.get('error', 'Unknown error')}")
+
+            except Exception as e:
+                logger.error(f"AI correction error: {str(e)}")
+                # Continue with uncorrected text
+            finally:
+                if RELEASE_AFTER_USE:
+                    release_corrector()
+
         return JSONResponse({
             "success": True,
             "text": combined_text,
             "total_regions": len(boxes),
             "recognized_regions": len(detailed_results),
-            "details": detailed_results
+            "details": detailed_results,
+            "ai_corrected": ai_corrected
         })
 
     except HTTPException:

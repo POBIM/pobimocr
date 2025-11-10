@@ -10,3 +10,9 @@ scikit-image>=0.20.0
 scipy>=1.10.0
 craft-text-detector
 easyocr>=1.7.0
+
+# Qwen3 LLM for OCR correction
+transformers>=4.37.0
+accelerate>=0.26.0
+bitsandbytes>=0.42.0
+sentencepiece>=0.1.99

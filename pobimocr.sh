@@ -20,6 +20,123 @@ MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# Detect if running under WSL to allow Windows host IP discovery
+is_wsl_environment() {
+    if [ -n "$WSL_INTEROP" ] || grep -qi "microsoft" /proc/version 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+# Determine a usable LAN IP for sharing network URLs
+get_network_host() {
+    local ip=""
+    local line=""
+    local adapter=""
+    
+    # Allow manual override for environments with strict networking
+    if [ -n "$POBIMORC_FRONTEND_HOST" ]; then
+        echo "$POBIMORC_FRONTEND_HOST"
+        return
+    fi
+    
+    local linux_candidates=()
+    local windows_candidates=()
+    
+    if command -v hostname >/dev/null 2>&1; then
+        while read -r ip; do
+            [ -n "$ip" ] && linux_candidates+=("$ip")
+        done < <(hostname -I 2>/dev/null | tr ' ' '\n')
+    fi
+    
+    if command -v ip >/dev/null 2>&1; then
+        while read -r ip; do
+            [ -n "$ip" ] && linux_candidates+=("$ip")
+        done < <(ip -4 addr show scope global | awk '/inet / {sub("/.*","",$2); print $2}')
+    fi
+    
+    if command -v ifconfig >/dev/null 2>&1; then
+        while read -r ip; do
+            [ -n "$ip" ] && linux_candidates+=("$ip")
+        done < <(ifconfig 2>/dev/null | awk '/inet / && $2 !~ /^127\./ {gsub("addr:", "", $2); print $2}')
+    fi
+    
+    # When running inside WSL, inspect Windows network adapters first
+    if is_wsl_environment && command -v ipconfig.exe >/dev/null 2>&1; then
+        while read -r line; do
+            line=$(echo "$line" | tr -d '\r')
+            
+            if echo "$line" | grep -Ei 'adapter .*:'; then
+                adapter="$line"
+                continue
+            fi
+            
+            if echo "$line" | grep -q "IPv4 Address"; then
+                ip=$(echo "$line" | awk -F: '{gsub(/^[ \t]+/, "", $2); print $2}')
+                if [ -n "$ip" ]; then
+                    if echo "$adapter" | grep -qiE "WSL|Hyper-V|Default Switch|Loopback|Virtual"; then
+                        continue
+                    fi
+                    windows_candidates+=("$ip")
+                fi
+            fi
+        done < <(ipconfig.exe 2>/dev/null)
+    fi
+    
+    local candidates=("${windows_candidates[@]}" "${linux_candidates[@]}")
+    
+    local -A seen=()
+    local filtered=()
+    for ip in "${candidates[@]}"; do
+        ip=$(echo "$ip" | tr -d '[:space:]')
+        if [ -z "$ip" ]; then
+            continue
+        fi
+        if [[ "$ip" == 127.* ]]; then
+            continue
+        fi
+        if ! [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            continue
+        fi
+        if [ -z "${seen[$ip]}" ]; then
+            filtered+=("$ip")
+            seen[$ip]=1
+        fi
+    done
+    
+    # Prefer 10.x ranges that are not Hyper-V host-only networks
+    for ip in "${filtered[@]}"; do
+        if [[ "$ip" == 10.* && "$ip" != 10.255.* ]]; then
+            echo "$ip"
+            return
+        fi
+    done
+    
+    # Fallback to any 10.x network if that's all we have
+    for ip in "${filtered[@]}"; do
+        if [[ "$ip" == 10.* ]]; then
+            echo "$ip"
+            return
+        fi
+    done
+    
+    for ip in "${filtered[@]}"; do
+        case "$ip" in
+            192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*)
+                echo "$ip"
+                return
+                ;;
+        esac
+    done
+    
+    if [ ${#filtered[@]} -gt 0 ]; then
+        echo "${filtered[0]}"
+        return
+    fi
+    
+    echo "localhost"
+}
+
 # Print functions
 print_banner() {
     echo -e "${CYAN}"
@@ -92,6 +209,9 @@ cmd_status() {
     if is_frontend_running; then
         local pid=$(cat "$FRONTEND_PID_FILE")
         print_success "Frontend: ${GREEN}Running${NC} (PID: $pid, Port: 3005)"
+        local frontend_network_host
+        frontend_network_host=$(get_network_host)
+        print_info "Frontend network URL: http://$frontend_network_host:3005"
     else
         print_warning "Frontend: ${YELLOW}Stopped${NC}"
     fi
@@ -116,7 +236,10 @@ cmd_status() {
     # URLs
     if is_backend_running && is_frontend_running; then
         echo -e "${CYAN}Access URLs:${NC}"
+        local frontend_network_host
+        frontend_network_host=$(get_network_host)
         echo -e "  Frontend:  ${GREEN}http://localhost:3005${NC}"
+        echo -e "  Frontend (Network): ${GREEN}http://$frontend_network_host:3005${NC}"
         echo -e "  Backend:   ${GREEN}http://localhost:8005${NC}"
         echo -e "  API Docs:  ${GREEN}http://localhost:8005/docs${NC}"
     fi
@@ -369,6 +492,9 @@ cmd_start() {
     nohup npm run dev > "$LOGS_DIR/frontend.log" 2>&1 &
     echo $! > "$FRONTEND_PID_FILE"
     print_success "Frontend started (PID: $(cat $FRONTEND_PID_FILE))"
+    local frontend_network_host
+    frontend_network_host=$(get_network_host)
+    print_info "Frontend network URL: http://$frontend_network_host:3005"
     
     cd "$SCRIPT_DIR"
     echo ""
@@ -408,7 +534,10 @@ cmd_start() {
     
     echo ""
     print_info "Access URLs:"
+    local frontend_network_host
+    frontend_network_host=$(get_network_host)
     echo -e "  Frontend:  ${CYAN}http://localhost:3005${NC}"
+    echo -e "  Frontend (Network): ${CYAN}http://$frontend_network_host:3005${NC}"
     echo -e "  Backend:   ${CYAN}http://localhost:8005${NC}"
     echo -e "  API Docs:  ${CYAN}http://localhost:8005/docs${NC}"
     echo ""

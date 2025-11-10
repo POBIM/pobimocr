@@ -20,6 +20,7 @@ interface OCRResponse {
   total_regions: number;
   recognized_regions: number;
   details: OCRDetail[];
+  ai_corrected?: boolean;
 }
 
 export default function CraftOCRPage() {
@@ -30,6 +31,10 @@ export default function CraftOCRPage() {
   const [error, setError] = useState<string | null>(null);
   const [pasteHint, setPasteHint] = useState(false);
   const [languages, setLanguages] = useState<string[]>(["th", "en"]);
+  const [showDetails, setShowDetails] = useState(false);
+  const [displayMode, setDisplayMode] = useState<"text" | "markdown" | "visual">("text");
+  const [editedText, setEditedText] = useState<string>("");
+  const [aiImproving, setAiImproving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -92,6 +97,7 @@ export default function CraftOCRPage() {
       const formData = new FormData();
       formData.append("file", selectedFile);
       formData.append("languages", JSON.stringify(languages));
+      formData.append("ai_correct", "false");
 
       const response = await fetch("/api/craft-ocr", {
         method: "POST",
@@ -105,6 +111,14 @@ export default function CraftOCRPage() {
       }
 
       setOcrResult(data);
+      // Set edited text เป็นผลลัพธ์เริ่มต้น
+      if (data.details && data.details.length > 0) {
+        setEditedText(formatTextWithLineBreaks(data.details));
+      } else if (data.text) {
+        setEditedText(data.text);
+      } else {
+        setEditedText("");
+      }
     } catch (err) {
       console.error("OCR Error:", err);
       setError(
@@ -117,11 +131,62 @@ export default function CraftOCRPage() {
     }
   };
 
+  const handleAiImprove = async () => {
+    if (!selectedFile) {
+      alert("กรุณาเลือกรูปภาพก่อน");
+      return;
+    }
+
+    if (!ocrResult) {
+      alert("ยังไม่มีผลลัพธ์ให้ปรับปรุง");
+      return;
+    }
+
+    setAiImproving(true);
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+      formData.append("languages", JSON.stringify(languages));
+      formData.append("ai_correct", "true");
+
+      const response = await fetch("/api/craft-ocr", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "AI correction failed");
+      }
+
+      setOcrResult(data);
+      if (data.text) {
+        setEditedText(data.text);
+      } else if (data.details && data.details.length > 0) {
+        setEditedText(formatTextWithLineBreaks(data.details));
+      }
+    } catch (err) {
+      console.error("AI Improve Error:", err);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "ปรับปรุงด้วย AI ไม่สำเร็จ กรุณาลองใหม่"
+      );
+    } finally {
+      setAiImproving(false);
+    }
+  };
+
   const handleClear = () => {
     setSelectedImage(null);
     setSelectedFile(null);
     setOcrResult(null);
     setError(null);
+    setEditedText("");
+    setAiImproving(false);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -130,6 +195,136 @@ export default function CraftOCRPage() {
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     alert("คัดลอกข้อความแล้ว!");
+  };
+
+  // จัดเรียง text ตามตำแหน่งจริงในรูป (top to bottom, left to right)
+  const formatTextWithLineBreaks = (details: OCRDetail[]): string => {
+    if (!details || details.length === 0) return "";
+
+    // Sort by y-coordinate first (top to bottom)
+    const sortedByY = [...details].sort((a, b) => a.box.y1 - b.box.y1);
+
+    // Group by rows (same y-coordinate within threshold)
+    const rows: OCRDetail[][] = [];
+    let currentRow: OCRDetail[] = [];
+    let lastY = sortedByY[0].box.y1;
+    const yThreshold = 20; // pixels tolerance for same row
+
+    sortedByY.forEach((detail) => {
+      if (Math.abs(detail.box.y1 - lastY) > yThreshold) {
+        if (currentRow.length > 0) {
+          rows.push(currentRow);
+        }
+        currentRow = [detail];
+        lastY = detail.box.y1;
+      } else {
+        currentRow.push(detail);
+      }
+    });
+    if (currentRow.length > 0) {
+      rows.push(currentRow);
+    }
+
+    // Sort each row by x-coordinate (left to right) and join with spaces
+    return rows
+      .map((row) =>
+        row
+          .sort((a, b) => a.box.x1 - b.box.x1)
+          .map((detail) => detail.text)
+          .join(" ")
+      )
+      .join("\n");
+  };
+
+  // จัดกลุ่มข้อมูลเป็น table data
+  const parseTableData = (details: OCRDetail[]): string[][] => {
+    if (!details || details.length === 0) return [];
+
+    // จัดกลุ่มเป็นแถว
+    const sortedByY = [...details].sort((a, b) => a.box.y1 - b.box.y1);
+    const rows: OCRDetail[][] = [];
+    let currentRow: OCRDetail[] = [];
+    let lastY = sortedByY[0].box.y1;
+    const yThreshold = 20;
+
+    sortedByY.forEach((detail) => {
+      if (Math.abs(detail.box.y1 - lastY) > yThreshold) {
+        if (currentRow.length > 0) {
+          rows.push(currentRow);
+        }
+        currentRow = [detail];
+        lastY = detail.box.y1;
+      } else {
+        currentRow.push(detail);
+      }
+    });
+    if (currentRow.length > 0) {
+      rows.push(currentRow);
+    }
+
+    // เรียงแต่ละแถวจากซ้ายไปขวา
+    const sortedRows = rows.map((row) =>
+      row.sort((a, b) => a.box.x1 - b.box.x1)
+    );
+
+    // หาจำนวนคอลัมน์สูงสุด
+    const maxCols = Math.max(...sortedRows.map((row) => row.length));
+
+    // แปลงเป็น 2D array
+    return sortedRows.map((row) => {
+      const cells = [];
+      for (let i = 0; i < maxCols; i++) {
+        cells.push(row[i]?.text || "");
+      }
+      return cells;
+    });
+  };
+
+  // แปลง edited text เป็น table data
+  const parseTextToTable = (text: string): string[][] => {
+    if (!text) return [];
+
+    const lines = text.split('\n').filter(line => line.trim());
+    return lines.map(line => {
+      // แยกด้วย space หลายๆช่องหรือ tab
+      return line.split(/\s{2,}|\t/).map(cell => cell.trim()).filter(cell => cell);
+    });
+  };
+
+  // แปลงข้อมูลเป็น Markdown table จาก edited text
+  const formatTextAsMarkdownTable = (text: string): string => {
+    const tableData = parseTextToTable(text);
+    if (tableData.length === 0) return text;
+
+    const tableRows = tableData.map((row) => {
+      return `| ${row.join(" | ")} |`;
+    });
+
+    // เพิ่ม header separator หลังแถวแรก
+    if (tableRows.length > 0) {
+      const separator = `| ${Array(tableData[0].length).fill("---").join(" | ")} |`;
+      tableRows.splice(1, 0, separator);
+    }
+
+    return tableRows.join("\n");
+  };
+
+  // แปลงข้อมูลเป็น Markdown table (เดิม - สำหรับ backward compatibility)
+  const formatAsMarkdownTable = (details: OCRDetail[]): string => {
+    const tableData = parseTableData(details);
+    if (tableData.length === 0) return "";
+
+    const tableRows = tableData.map((row) => {
+      return `| ${row.join(" | ")} |`;
+    });
+
+    // เพิ่ม header separator หลังแถวแรก
+    if (tableRows.length > 0) {
+      const separator = `| ${Array(tableData[0].length).fill("---").join(" | ")} |`;
+      tableRows.splice(1, 0, separator);
+    }
+
+    return tableRows.join("\n");
   };
 
   return (
@@ -250,49 +445,163 @@ export default function CraftOCRPage() {
         <div className="space-y-5">
           <div className="rounded-xl border border-gray-200 bg-white p-5">
             <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-gray-800">ผลลัพธ์</h2>
-              {ocrResult?.text && (
-                <button
-                  onClick={() => copyToClipboard(ocrResult.text)}
-                  className="rounded-full border border-green-200 bg-green-50 px-3 py-1 text-xs font-medium text-green-700 transition hover:bg-green-100"
-                >
-                  คัดลอก
-                </button>
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-semibold text-gray-800">ผลลัพธ์ (แก้ไขได้)</h2>
+                {ocrResult?.ai_corrected && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">
+                    <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                    </svg>
+                    AI แก้ไขแล้ว
+                  </span>
+                )}
+              </div>
+              {editedText && displayMode !== "visual" && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => copyToClipboard(
+                      displayMode === "text"
+                        ? editedText
+                        : formatTextAsMarkdownTable(editedText)
+                    )}
+                    className="rounded-full border border-green-200 bg-green-50 px-3 py-1 text-xs font-medium text-green-700 transition hover:bg-green-100"
+                  >
+                    คัดลอก
+                  </button>
+                  <button
+                    onClick={handleAiImprove}
+                    disabled={!selectedFile || aiImproving || loading}
+                    className="rounded-full border border-purple-200 bg-purple-50 px-3 py-1 text-xs font-medium text-purple-700 transition hover:bg-purple-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {aiImproving ? "กำลังปรับปรุง..." : "ปรับปรุงด้วย AI"}
+                  </button>
+                </div>
               )}
             </div>
 
             {ocrResult ? (
               <div className="mt-4 space-y-4">
-                <div className="grid grid-cols-2 gap-4 rounded-lg border border-purple-100 bg-purple-50/50 p-4 text-sm">
-                  <div>
-                    <p className="text-gray-600 text-xs">พื้นที่ที่ตรวจพบ</p>
-                    <p className="text-2xl font-semibold text-purple-700">{ocrResult.total_regions}</p>
+                {/* Toggle โหมดการแสดงผล */}
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-600">รูปแบบ:</span>
+                    <div className="inline-flex rounded-lg border border-gray-200 bg-white p-1">
+                      <button
+                        onClick={() => setDisplayMode("text")}
+                        className={`rounded-md px-3 py-1 text-xs font-medium transition ${
+                          displayMode === "text"
+                            ? "bg-purple-100 text-purple-700"
+                            : "text-gray-600 hover:text-gray-900"
+                        }`}
+                      >
+                        ข้อความ
+                      </button>
+                      <button
+                        onClick={() => setDisplayMode("markdown")}
+                        className={`rounded-md px-3 py-1 text-xs font-medium transition ${
+                          displayMode === "markdown"
+                            ? "bg-purple-100 text-purple-700"
+                            : "text-gray-600 hover:text-gray-900"
+                        }`}
+                      >
+                        Markdown
+                      </button>
+                      <button
+                        onClick={() => setDisplayMode("visual")}
+                        className={`rounded-md px-3 py-1 text-xs font-medium transition ${
+                          displayMode === "visual"
+                            ? "bg-purple-100 text-purple-700"
+                            : "text-gray-600 hover:text-gray-900"
+                        }`}
+                      >
+                        ตาราง
+                      </button>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-gray-600 text-xs">อ่านสำเร็จ</p>
-                    <p className="text-2xl font-semibold text-green-600">{ocrResult.recognized_regions}</p>
-                  </div>
+                  <p className="text-xs text-gray-500">
+                    💡 เคล็ดลับ: ใช้ 2 spaces หรือมากกว่าเพื่อแยกคอลัมน์ในตาราง
+                  </p>
                 </div>
 
-                <textarea
-                  value={ocrResult.text}
-                  readOnly
-                  className="h-36 w-full rounded-lg border border-gray-200 bg-gray-50/50 p-4 font-mono text-sm text-gray-800"
-                />
+                {displayMode === "visual" ? (
+                  <div className="overflow-auto rounded-lg border border-gray-200 bg-white max-h-[500px]">
+                    <table className="w-full text-sm">
+                      <thead className="sticky top-0">
+                        <tr className="border-b border-gray-200 bg-purple-50/50">
+                          {parseTextToTable(editedText)[0]?.map((cell, index) => (
+                            <th
+                              key={index}
+                              className="px-4 py-3 text-left font-semibold text-gray-800"
+                            >
+                              {cell}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {parseTextToTable(editedText).slice(1).map((row, rowIndex) => (
+                          <tr
+                            key={rowIndex}
+                            className="border-b border-gray-100 transition hover:bg-gray-50/50"
+                          >
+                            {row.map((cell, cellIndex) => (
+                              <td key={cellIndex} className="px-4 py-3 text-gray-700">
+                                {cell}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <textarea
+                    value={
+                      displayMode === "text"
+                        ? editedText
+                        : formatTextAsMarkdownTable(editedText)
+                    }
+                    onChange={(e) => {
+                      if (displayMode === "text") {
+                        setEditedText(e.target.value);
+                      }
+                    }}
+                    placeholder="ผลลัพธ์จะแสดงที่นี่..."
+                    className="h-[500px] w-full rounded-lg border border-gray-200 bg-white p-4 font-mono text-sm text-gray-800 leading-relaxed focus:border-purple-300 focus:outline-none focus:ring-2 focus:ring-purple-100 transition"
+                    style={{ whiteSpace: 'pre-wrap' }}
+                  />
+                )}
 
-                <div>
-                  <h3 className="text-sm font-semibold text-gray-800">รายละเอียด</h3>
-                  <div className="mt-3 max-h-80 space-y-2 overflow-y-auto">
-                    {ocrResult.details.map((detail, index) => (
-                      <div key={`${detail.text}-${index}`} className="rounded-lg border border-gray-200 bg-gray-50/50 p-3 text-sm">
-                        <p className="font-medium text-gray-800">{detail.text}</p>
-                        <p className="text-xs text-gray-500 mt-1">
-                          {(detail.confidence * 100).toFixed(1)}%
-                        </p>
+                {ocrResult.details && ocrResult.details.length > 0 && (
+                  <div className="rounded-lg border border-gray-200">
+                    <button
+                      onClick={() => setShowDetails(!showDetails)}
+                      className="flex w-full items-center justify-between rounded-lg bg-gray-50/50 p-3 text-sm font-medium text-gray-700 transition hover:bg-gray-100/50"
+                    >
+                      <span>รายละเอียดความมั่นใจ ({ocrResult.details.length} รายการ)</span>
+                      <svg
+                        className={`h-4 w-4 transition-transform ${showDetails ? 'rotate-180' : ''}`}
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                    {showDetails && (
+                      <div className="max-h-60 space-y-2 overflow-y-auto p-3">
+                        {ocrResult.details.map((detail, index) => (
+                          <div key={`${detail.text}-${index}`} className="rounded-lg border border-gray-200 bg-white p-3 text-sm">
+                            <p className="font-medium text-gray-800">{detail.text}</p>
+                            <p className="text-xs text-gray-500 mt-1">
+                              ความมั่นใจ: {(detail.confidence * 100).toFixed(1)}%
+                            </p>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    )}
                   </div>
-                </div>
+                )}
               </div>
             ) : (
               <div className="mt-6 rounded-lg border border-dashed border-gray-300 bg-gray-50/30 p-8 text-center text-gray-400">

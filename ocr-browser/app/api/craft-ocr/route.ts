@@ -7,6 +7,7 @@ export async function POST(request: NextRequest) {
     const formData = await request.formData();
     const file = formData.get('file') as File;
     const languagesStr = formData.get('languages') as string;
+    const aiCorrect = formData.get('ai_correct') as string;
 
     if (!file) {
       return NextResponse.json(
@@ -29,6 +30,7 @@ export async function POST(request: NextRequest) {
     const pythonFormData = new FormData();
     pythonFormData.append('file', file);
     pythonFormData.append('languages', JSON.stringify(languages));
+    pythonFormData.append('ai_correct', aiCorrect || 'false');
 
     // Try CRAFT endpoint first, fallback to simple if it fails
     let response = await fetch(`${PYTHON_API_URL}/ocr`, {
@@ -42,7 +44,8 @@ export async function POST(request: NextRequest) {
       const simplePythonFormData = new FormData();
       simplePythonFormData.append('file', file);
       simplePythonFormData.append('languages', JSON.stringify(languages));
-      
+      simplePythonFormData.append('ai_correct', aiCorrect || 'false');
+
       response = await fetch(`${PYTHON_API_URL}/ocr-simple`, {
         method: 'POST',
         body: simplePythonFormData,
