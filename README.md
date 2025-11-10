@@ -1,32 +1,23 @@
-# POBIMORC - Thai OCR System# POBIMORC - Thai OCR System# POBIMORC - Thai OCR System
+# POBIMOCR - Thai OCR System
 
-
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
+[![Next.js 16](https://img.shields.io/badge/next.js-16-black)](https://nextjs.org/)
+[![CUDA](https://img.shields.io/badge/CUDA-12.8-green.svg)](https://developer.nvidia.com/cuda-toolkit)
 
 ระบบ OCR (Optical Character Recognition) ความแม่นยำสูงสำหรับภาษาไทย  
-
 ใช้เทคโนโลยี **CRAFT + EasyOCR** พร้อม **GPU acceleration**
-
-ระบบ OCR (Optical Character Recognition) ความแม่นยำสูงสำหรับภาษาไทย ใช้เทคโนโลยี CRAFT + EasyOCR พร้อม GPU accelerationระบบ OCR (Optical Character Recognition) ความแม่นยำสูงสำหรับภาษาไทย ใช้เทคโนโลยี CRAFT + EasyOCR พร้อม GPU acceleration
 
 ## ✨ คุณสมบัติ
 
-
-
 - 🎯 **ความแม่นยำสูง** - CRAFT text detection + EasyOCR recognition
-
-- 🚀 **GPU Support** - NVIDIA CUDA เร็วขึ้น 10+ เท่า## ✨ คุณสมบัติ## ✨ คุณสมบัติ
-
+- 🚀 **GPU Acceleration** - รองรับ NVIDIA CUDA เร็วขึ้น 10+ เท่า
 - 🌐 **Multi-language** - รองรับภาษาไทย + อังกฤษ
-
-- 📱 **Modern UI** - Next.js 16 + React 19 + Tailwind CSS
-
+- 📱 **Modern UI** - Next.js 16 + React 19 + Tailwind CSS 4
 - ⚡ **Real-time** - ประมวลผลแบบ real-time
+- 🔌 **REST API** - FastAPI พร้อม auto-docs
 
-- 🔌 **REST API** - FastAPI พร้อม auto-docs- 🎯 **ความแม่นยำสูง**: ใช้ CRAFT สำหรับ text detection และ EasyOCR สำหรับ recognition- 🎯 **ความแม่นยำสูง**: ใช้ CRAFT สำหรับ text detection และ EasyOCR สำหรับ recognition
-
-
-
-## 🚀 Quick Start- 🚀 **GPU Acceleration**: รองรับ NVIDIA CUDA สำหรับประมวลผลเร็วขึ้น 10+ เท่า- 🚀 **GPU Acceleration**: รองรับ NVIDIA CUDA สำหรับประมวลผลเร็วขึ้น 10+ เท่า
+## 🚀 Quick Start
 
 
 
