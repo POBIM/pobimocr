@@ -569,7 +569,10 @@ export default function CraftOCRPage() {
             <div className="mt-5 flex flex-wrap gap-3">
               <button
                 onClick={handleOCR}
-                disabled={!selectedFile || loading}
+                disabled={
+                  loading ||
+                  (!selectedFile && pdfPages.length === 0)
+                }
                 className="flex-1 rounded-full bg-purple-600 px-6 py-2.5 text-sm font-medium text-white transition hover:bg-purple-700 disabled:cursor-not-allowed disabled:bg-gray-300"
               >
                 {loading ? "ประมวลผล..." : "เริ่มประมวลผล"}
@@ -729,7 +732,11 @@ export default function CraftOCRPage() {
                   </button>
                   <button
                     onClick={handleAiImprove}
-                    disabled={!selectedFile || aiImproving || loading}
+                    disabled={
+                      aiImproving ||
+                      loading ||
+                      (!selectedFile && pdfPages.length === 0)
+                    }
                     className="rounded-full border border-purple-200 bg-purple-50 px-3 py-1 text-xs font-medium text-purple-700 transition hover:bg-purple-100 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {aiImproving ? "กำลังปรับปรุง..." : "ปรับปรุงด้วย AI"}
