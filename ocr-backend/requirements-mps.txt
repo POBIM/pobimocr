@@ -1,0 +1,9 @@
+# Apple Silicon (M1/M2/M3/M4) with MPS support
+-r requirements-base.txt
+
+# PyTorch with MPS support (Mac optimized)
+torch>=2.1.0
+torchvision>=0.16.0
+
+# Note: bitsandbytes is not supported on Mac
+# AI correction will use CPU fallback or fp16 instead of int8

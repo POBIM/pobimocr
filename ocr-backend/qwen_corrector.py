@@ -3,10 +3,19 @@
 import gc
 import logging
 import os
+import platform
 from typing import Optional, List, Dict
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# Try to import BitsAndBytesConfig, but don't fail if not available (Mac compatibility)
+try:
+    from transformers import BitsAndBytesConfig
+    BITSANDBYTES_AVAILABLE = True
+except ImportError:
+    BITSANDBYTES_AVAILABLE = False
+    logging.warning("BitsAndBytes not available - quantization will be disabled")
 
 DEFAULT_QWEN_MODEL = os.getenv("QWEN_MODEL_NAME", "Qwen/Qwen3-4B-Instruct-2507")
 RELEASE_AFTER_USE = os.getenv("QWEN_RELEASE_AFTER_USE", "false").lower() in {"1", "true", "yes"}
@@ -15,6 +24,32 @@ DEFAULT_TOP_P = float(os.getenv("QWEN_TOP_P", "0.7"))
 MAX_NEW_TOKENS = int(os.getenv("QWEN_MAX_NEW_TOKENS", "32768"))
 
 logger = logging.getLogger(__name__)
+
+
+def _get_map_location():
+    """Get appropriate map_location for torch.load based on available devices"""
+    if torch.cuda.is_available():
+        return None  # Use default CUDA mapping
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return "mps"  # Map to MPS
+    else:
+        return "cpu"  # Map to CPU
+
+
+def _patch_torch_load():
+    """Monkey patch torch.load to automatically map CUDA tensors to available device"""
+    original_load = torch.load
+    
+    def patched_load(*args, **kwargs):
+        # If map_location is not specified, use our default
+        if 'map_location' not in kwargs:
+            map_location = _get_map_location()
+            if map_location:
+                kwargs['map_location'] = map_location
+        return original_load(*args, **kwargs)
+    
+    torch.load = patched_load
+    return original_load
 
 
 class QwenOCRCorrector:
@@ -31,16 +66,33 @@ class QwenOCRCorrector:
 
         Args:
             model_name: HuggingFace model name (will use Qwen3 when available)
-            quantize: Use 4-bit quantization for lower VRAM usage
+            quantize: Use 4-bit quantization for lower VRAM usage (CUDA only)
             max_length: Maximum token length for generation
         """
         self.model_name = model_name or DEFAULT_QWEN_MODEL
         self.max_length = max_length
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # Detect device: CUDA, MPS (Mac), or CPU
+        if torch.cuda.is_available():
+            self.device = "cuda"
+            self.can_quantize = BITSANDBYTES_AVAILABLE and quantize
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            self.device = "mps"
+            self.can_quantize = False  # MPS doesn't support bitsandbytes
+            logger.info("Using MPS (Apple Silicon) - quantization disabled")
+        else:
+            self.device = "cpu"
+            self.can_quantize = False
 
         logger.info(f"Loading Qwen model: {self.model_name}")
         logger.info(f"Device: {self.device}")
-        logger.info(f"Quantization: {quantize}")
+        logger.info(f"Platform: {platform.machine()}")
+        logger.info(f"Quantization: {self.can_quantize}")
+
+        # Patch torch.load to handle device mapping for models saved on CUDA
+        if self.device != "cuda":
+            logger.info("Patching torch.load to map CUDA tensors to available device...")
+            _patch_torch_load()
 
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -48,8 +100,8 @@ class QwenOCRCorrector:
             trust_remote_code=True
         )
 
-        # Load model with optional quantization
-        if quantize and torch.cuda.is_available():
+        # Load model with optional quantization (CUDA only)
+        if self.can_quantize:
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.float16,
@@ -63,14 +115,39 @@ class QwenOCRCorrector:
                 device_map="auto",
                 trust_remote_code=True
             )
-            logger.info("Model loaded with 4-bit quantization")
+            logger.info("Model loaded with 4-bit quantization (CUDA)")
         else:
+            # For MPS and CPU, use fp16 or fp32
+            # Use low_cpu_mem_usage to avoid device mapping issues
+            model_kwargs = {
+                "trust_remote_code": True,
+                "low_cpu_mem_usage": True
+            }
+
+            # Set device_map only for CUDA
+            if self.device == "cuda":
+                model_kwargs["device_map"] = "auto"
+            else:
+                # For MPS and CPU, don't use device_map to avoid CUDA device errors
+                model_kwargs["device_map"] = None
+
+            # Use fp16 for MPS to save memory
+            if self.device == "mps":
+                model_kwargs["torch_dtype"] = torch.float16
+                logger.info("Using fp16 precision for MPS")
+
+            # Load model - this will load on CPU first, then we move to target device
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                device_map="auto",
-                trust_remote_code=True
+                **model_kwargs
             )
-            logger.info("Model loaded without quantization")
+
+            # Move to device if not using device_map (MPS or CPU)
+            if self.device != "cuda":
+                logger.info(f"Moving model to {self.device} device...")
+                self.model = self.model.to(self.device)
+
+            logger.info(f"Model loaded without quantization ({self.device.upper()})")
 
         self.model.eval()
         logger.info("Qwen model initialized successfully")
@@ -94,8 +171,12 @@ class QwenOCRCorrector:
         finally:
             self.tokenizer = None
 
+        # Clear cache for different backends
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+
         gc.collect()
         logger.info("Qwen model memory released")
 

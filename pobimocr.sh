@@ -29,6 +29,17 @@ is_wsl_environment() {
 }
 
 # Determine a usable LAN IP for sharing network URLs
+array_contains() {
+    local needle="$1"
+    shift
+    for element in "$@"; do
+        if [ "$element" = "$needle" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 get_network_host() {
     local ip=""
     local line=""
@@ -85,7 +96,6 @@ get_network_host() {
     
     local candidates=("${windows_candidates[@]}" "${linux_candidates[@]}")
     
-    local -A seen=()
     local filtered=()
     for ip in "${candidates[@]}"; do
         ip=$(echo "$ip" | tr -d '[:space:]')
@@ -98,9 +108,8 @@ get_network_host() {
         if ! [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             continue
         fi
-        if [ -z "${seen[$ip]}" ]; then
+        if ! array_contains "$ip" "${filtered[@]}"; then
             filtered+=("$ip")
-            seen[$ip]=1
         fi
     done
     

@@ -1,0 +1,8 @@
+# CPU-only dependencies (Mac Intel, Linux without GPU, etc.)
+-r requirements-base.txt
+
+# PyTorch CPU version
+torch>=2.1.0
+torchvision>=0.16.0
+
+# Note: No bitsandbytes for CPU-only systems

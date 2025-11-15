@@ -9,6 +9,7 @@ import io
 from PIL import Image
 import logging
 import json
+import os
 from typing import Optional
 from qwen_corrector import get_corrector, release_corrector, RELEASE_AFTER_USE
 
@@ -33,40 +34,224 @@ app.add_middleware(
 )
 
 # Global variables for models (initialized on startup)
-craft_detector = None
+craft_detectors = {}  # Cache CRAFT detectors by (long_size, refiner)
 ocr_readers = {}  # Cache of OCR readers by language combination
+device_config = None
+
+
+def _env_bool(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning(f"Invalid integer for {name}: {value!r}, using {default}")
+        return default
+
+
+CRAFT_LONG_SIZE_MIN = 480
+CRAFT_LONG_SIZE_MAX = 2560
+
+
+def apply_craft_numpy_patch():
+    """
+    Patch craft_text_detector so it keeps working after NumPy 2.0 tightened
+    ragged-array handling (which would otherwise raise ValueError).
+    """
+    try:
+        import craft_text_detector.craft_utils as craft_utils
+        import craft_text_detector.predict as craft_predict
+        import craft_text_detector.file_utils as craft_file_utils
+        import craft_text_detector.image_utils as craft_image_utils
+    except ImportError:
+        return
+
+    class _NumpyCompatHelper:
+        def __init__(self, base_np):
+            self._base = base_np
+
+        def array(self, *args, **kwargs):
+            try:
+                return self._base.array(*args, **kwargs)
+            except ValueError as exc:
+                message = str(exc)
+                if (
+                    "inhomogeneous shape" in message
+                    or "setting an array element with a sequence" in message
+                ) and "dtype" not in kwargs:
+                    return self._base.array(*args, dtype=object, **kwargs)
+                raise
+
+        def __getattr__(self, name):
+            return getattr(self._base, name)
+
+    def _patch_module(module):
+        if not hasattr(module, "np"):
+            return
+        if getattr(module, "_pobimocr_np_patched", False):
+            return
+        module.np = _NumpyCompatHelper(module.np)
+        module._pobimocr_np_patched = True
+
+    for mod in (
+        craft_utils,
+        craft_predict,
+        craft_file_utils,
+        craft_image_utils,
+    ):
+        _patch_module(mod)
+
+
+apply_craft_numpy_patch()
+
+
+def _parse_craft_request_settings(long_size_param, refiner_param):
+    """Resolve requested CRAFT settings with validation and defaults."""
+    global device_config
+    if device_config is None:
+        base_long = 1280
+        base_refiner = True
+    else:
+        base_long = device_config.get("craft_long_size", 1280)
+        base_refiner = device_config.get("craft_refiner", True)
+
+    selected_long = base_long
+    selected_refiner = base_refiner
+
+    if long_size_param:
+        try:
+            parsed = int(long_size_param)
+            if parsed < CRAFT_LONG_SIZE_MIN or parsed > CRAFT_LONG_SIZE_MAX:
+                logger.warning(
+                    f"CRAFT long_size {parsed} outside allowed range "
+                    f"({CRAFT_LONG_SIZE_MIN}-{CRAFT_LONG_SIZE_MAX}), using {base_long}"
+                )
+            else:
+                selected_long = parsed
+        except ValueError:
+            logger.warning(f"Invalid craft_long_size value {long_size_param!r}, using {base_long}")
+
+    if refiner_param:
+        selected_refiner = refiner_param.strip().lower() in ("1", "true", "yes", "on")
+
+    return selected_long, selected_refiner
+
+
+def get_craft_detector(long_size=None, refiner=None):
+    """Return a cached CRAFT detector for requested settings."""
+    global craft_detectors, device_config
+    if device_config is None:
+        device_config = get_device_info()
+
+    target_long = long_size if long_size is not None else device_config.get("craft_long_size", 1280)
+    target_refiner = refiner if refiner is not None else device_config.get("craft_refiner", True)
+
+    key = (target_long, target_refiner)
+    if key not in craft_detectors:
+        logger.info(
+            f"Initializing CRAFT detector (long_size={target_long}, refiner={target_refiner})"
+        )
+        craft_detectors[key] = Craft(
+            output_dir=None,
+            crop_type="poly",
+            cuda=device_config.get("craft_supports_cuda", False),
+            long_size=target_long,
+            refiner=target_refiner,
+        )
+    return craft_detectors[key]
+
+
+def get_device_info():
+    """Detect and return device information (CUDA, MPS, or CPU)"""
+    import torch
+    import platform
+
+    device_info = {
+        "type": "cpu",
+        "name": "CPU",
+        "cuda_available": False,
+        "mps_available": False,
+        "use_gpu": False,
+        "craft_supports_cuda": False,
+        "easyocr_gpu": False,
+    }
+
+    # Check CUDA (NVIDIA GPU)
+    if torch.cuda.is_available():
+        device_info["type"] = "cuda"
+        device_info["name"] = torch.cuda.get_device_name(0)
+        device_info["cuda_available"] = True
+        device_info["use_gpu"] = True
+        device_info["craft_supports_cuda"] = True
+        device_info["easyocr_gpu"] = True
+        logger.info(f"✓ CUDA GPU detected: {device_info['name']}")
+        logger.info(f"  CUDA version: {torch.version.cuda}")
+
+    # Check MPS (Apple Silicon)
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        device_info["type"] = "mps"
+        device_info["name"] = f"Apple Silicon ({platform.machine()})"
+        device_info["mps_available"] = True
+        device_info["use_gpu"] = True
+        device_info["easyocr_gpu"] = True
+        logger.info(f"✓ MPS (Metal) GPU detected: {device_info['name']}")
+        logger.info(f"  PyTorch MPS backend enabled")
+        logger.info("CRAFT currently supports CUDA only, falling back to CPU for detector")
+
+    else:
+        logger.info(f"⚠ No GPU detected, using CPU")
+        logger.info(f"  Platform: {platform.machine()}")
+
+    return device_info
 
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize models on startup"""
-    global craft_detector, ocr_readers
+    global ocr_readers, device_config
 
-    # Check CUDA availability
-    import torch
-    cuda_available = torch.cuda.is_available()
-    logger.info(f"CUDA available: {cuda_available}")
-    if cuda_available:
-        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
-        logger.info(f"CUDA version: {torch.version.cuda}")
+    # Detect device (CUDA, MPS, or CPU)
+    device_config = get_device_info()
+    use_cuda = device_config["craft_supports_cuda"]
+    easyocr_gpu = device_config["easyocr_gpu"]
+    default_long_size = 1280
+    default_refiner = True
 
-    logger.info("Initializing CRAFT text detector...")
-    craft_detector = Craft(
-        output_dir=None,
-        crop_type="poly",
-        cuda=cuda_available,  # Enable CUDA if available
-        long_size=1280
+    # CPU-only mode benefits from smaller input + no refiner for big speedups
+    if not use_cuda:
+        default_long_size = 960
+        default_refiner = False
+
+    craft_long_size = _env_int("CRAFT_LONG_SIZE", default_long_size)
+    craft_use_refiner = _env_bool("CRAFT_USE_REFINER", default_refiner)
+    device_config["craft_long_size"] = craft_long_size
+    device_config["craft_refiner"] = craft_use_refiner
+
+    logger.info(
+        f"CRAFT settings -> cuda={use_cuda}, long_size={craft_long_size}, refiner={craft_use_refiner}"
     )
-    logger.info("CRAFT initialized successfully")
+
+    logger.info("Initializing CRAFT text detector cache...")
+    craft_detectors.clear()
+    get_craft_detector(long_size=craft_long_size, refiner=craft_use_refiner)
+    logger.info("Default CRAFT detector initialized successfully")
 
     logger.info("Pre-loading default EasyOCR reader for Thai and English...")
-    ocr_readers['th,en'] = easyocr.Reader(['th', 'en'], gpu=cuda_available)  # Enable GPU if available
+    ocr_readers['th,en'] = easyocr.Reader(['th', 'en'], gpu=easyocr_gpu)
     logger.info("Default EasyOCR reader initialized successfully")
 
 
 def get_ocr_reader(languages):
     """Get or create OCR reader for specified languages"""
-    global ocr_readers
+    global ocr_readers, device_config
     import torch
 
     # Sort languages to ensure consistent cache key
@@ -74,8 +259,13 @@ def get_ocr_reader(languages):
 
     if lang_key not in ocr_readers:
         logger.info(f"Creating new EasyOCR reader for languages: {languages}")
-        cuda_available = torch.cuda.is_available()
-        ocr_readers[lang_key] = easyocr.Reader(languages, gpu=cuda_available)
+        # Fall back to torch.cuda availability if device_config is not set
+        gpu_enabled = False
+        if device_config:
+            gpu_enabled = device_config["easyocr_gpu"]
+        else:
+            gpu_enabled = torch.cuda.is_available()
+        ocr_readers[lang_key] = easyocr.Reader(languages, gpu=gpu_enabled)
         logger.info(f"EasyOCR reader for {languages} created successfully")
 
     return ocr_readers[lang_key]
@@ -99,7 +289,12 @@ async def health_check():
     """Detailed health check"""
     return {
         "status": "healthy",
-        "craft_loaded": craft_detector is not None,
+        "craft_loaded": len(craft_detectors) > 0,
+        "craft_cached_configs": [{"long_size": key[0], "refiner": key[1]} for key in craft_detectors.keys()],
+        "default_craft_settings": {
+            "long_size": device_config.get("craft_long_size") if device_config else None,
+            "refiner": device_config.get("craft_refiner") if device_config else None,
+        },
         "ocr_readers_loaded": len(ocr_readers),
         "available_language_combinations": list(ocr_readers.keys())
     }
@@ -109,7 +304,9 @@ async def health_check():
 async def process_ocr(
     file: UploadFile = File(...),
     languages: Optional[str] = Form(None),
-    ai_correct: Optional[str] = Form("false")
+    ai_correct: Optional[str] = Form("false"),
+    craft_long_size: Optional[str] = Form(None),
+    craft_use_refiner: Optional[str] = Form(None),
 ):
     """
     Process uploaded image with CRAFT + EasyOCR
@@ -136,8 +333,18 @@ async def process_ocr(
 
         logger.info(f"Using languages: {lang_list}")
 
+        # Determine requested CRAFT settings
+        requested_long_size, requested_refiner = _parse_craft_request_settings(
+            craft_long_size, craft_use_refiner
+        )
+        craft_settings = {
+            "long_size": requested_long_size,
+            "refiner": requested_refiner
+        }
+
         # Get OCR reader for specified languages
         ocr_reader = get_ocr_reader(lang_list)
+        detector = get_craft_detector(requested_long_size, requested_refiner)
 
         # Validate file type
         if not file.content_type.startswith('image/'):
@@ -154,9 +361,11 @@ async def process_ocr(
             raise HTTPException(status_code=400, detail="Invalid image file")
 
         # Step 1: Use CRAFT to detect text regions
-        logger.info("Running CRAFT text detection...")
+        logger.info(
+            f"Running CRAFT text detection (long_size={requested_long_size}, refiner={requested_refiner})..."
+        )
         try:
-            prediction_result = craft_detector.detect_text(img)
+            prediction_result = detector.detect_text(img)
         except Exception as e:
             logger.error(f"CRAFT detection failed: {str(e)}")
             # Fallback to simple OCR if CRAFT fails
@@ -211,7 +420,8 @@ async def process_ocr(
                 "recognized_regions": len(detailed_results),
                 "details": detailed_results,
                 "mode": "fallback_easyocr_only",
-                "ai_corrected": ai_corrected_fallback
+                "ai_corrected": ai_corrected_fallback,
+                "craft_settings": craft_settings
             })
         
         boxes = prediction_result["boxes"]
@@ -331,7 +541,8 @@ async def process_ocr(
             "total_regions": len(boxes),
             "recognized_regions": len(detailed_results),
             "details": detailed_results,
-            "ai_corrected": ai_corrected
+            "ai_corrected": ai_corrected,
+            "craft_settings": craft_settings
         })
 
     except HTTPException:

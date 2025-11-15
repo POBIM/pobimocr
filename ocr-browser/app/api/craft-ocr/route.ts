@@ -8,6 +8,8 @@ export async function POST(request: NextRequest) {
     const file = formData.get('file') as File;
     const languagesStr = formData.get('languages') as string;
     const aiCorrect = formData.get('ai_correct') as string;
+    const craftLongSize = formData.get('craft_long_size') as string | null;
+    const craftUseRefiner = formData.get('craft_use_refiner') as string | null;
 
     if (!file) {
       return NextResponse.json(
@@ -31,6 +33,12 @@ export async function POST(request: NextRequest) {
     pythonFormData.append('file', file);
     pythonFormData.append('languages', JSON.stringify(languages));
     pythonFormData.append('ai_correct', aiCorrect || 'false');
+    if (craftLongSize) {
+      pythonFormData.append('craft_long_size', craftLongSize);
+    }
+    if (craftUseRefiner) {
+      pythonFormData.append('craft_use_refiner', craftUseRefiner);
+    }
 
     // Try CRAFT endpoint first, fallback to simple if it fails
     let response = await fetch(`${PYTHON_API_URL}/ocr`, {
@@ -45,6 +53,12 @@ export async function POST(request: NextRequest) {
       simplePythonFormData.append('file', file);
       simplePythonFormData.append('languages', JSON.stringify(languages));
       simplePythonFormData.append('ai_correct', aiCorrect || 'false');
+      if (craftLongSize) {
+        simplePythonFormData.append('craft_long_size', craftLongSize);
+      }
+      if (craftUseRefiner) {
+        simplePythonFormData.append('craft_use_refiner', craftUseRefiner);
+      }
 
       response = await fetch(`${PYTHON_API_URL}/ocr-simple`, {
         method: 'POST',

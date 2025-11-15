@@ -22,6 +22,10 @@ interface OCRResponse {
   recognized_regions: number;
   details: OCRDetail[];
   ai_corrected?: boolean;
+  craft_settings?: {
+    long_size: number;
+    refiner: boolean;
+  };
 }
 
 interface PDFPageContent {
@@ -31,6 +35,14 @@ interface PDFPageContent {
 }
 
 export default function CraftOCRPage() {
+  const craftLongSizeOptions = [
+    { value: 960, label: "960 px – เร็วบน CPU" },
+    { value: 1280, label: "1280 px – สมดุล" },
+    { value: 1400, label: "1400 px – ชัดขึ้น" },
+    { value: 1600, label: "1600 px – คุณภาพสูง" },
+    { value: 1920, label: "1920 px – สูงสุด (ค่าเริ่มต้น)" },
+    { value: 2048, label: "2048 px – ต้องการสเป็กสูง" },
+  ];
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [ocrResult, setOcrResult] = useState<OCRResponse | null>(null);
@@ -51,6 +63,9 @@ export default function CraftOCRPage() {
   const [pdfError, setPdfError] = useState<string | null>(null);
   const [pdfFileName, setPdfFileName] = useState<string>("");
   const [pageSeparatorTemplate, setPageSeparatorTemplate] = useState<string>("----- หน้า {{page}} -----");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [craftLongSize, setCraftLongSize] = useState<number>(1920);
+  const [craftUseRefiner, setCraftUseRefiner] = useState<boolean>(true);
 
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
@@ -205,6 +220,8 @@ export default function CraftOCRPage() {
     formData.append("file", file);
     formData.append("languages", JSON.stringify(languages));
     formData.append("ai_correct", aiCorrectValue ? "true" : "false");
+    formData.append("craft_long_size", craftLongSize.toString());
+    formData.append("craft_use_refiner", craftUseRefiner ? "true" : "false");
 
     const response = await fetch("/api/craft-ocr", {
       method: "POST",
@@ -351,6 +368,7 @@ export default function CraftOCRPage() {
       let aggregatedDetails: OCRDetail[] = [];
       let aiCorrected = false;
       let processedPages = 0;
+      let lastCraftSettings: OCRResponse["craft_settings"] | null = null;
       const baseName = pdfFileName ? pdfFileName.replace(/\.pdf$/i, "") : "pdf-page";
 
       for (const page of sortedPages) {
@@ -372,6 +390,7 @@ export default function CraftOCRPage() {
             : result.details && result.details.length > 0
               ? formatTextWithLineBreaks(result.details)
               : "";
+        lastCraftSettings = result.craft_settings || lastCraftSettings;
 
         const separator = pageSeparatorTemplate.replace(
           "{{page}}",
@@ -400,6 +419,7 @@ export default function CraftOCRPage() {
         recognized_regions: recognizedRegions,
         details: aggregatedDetails,
         ai_corrected: aiCorrected,
+        craft_settings: lastCraftSettings || undefined,
       };
 
       setOcrResult(aggregateResponse);
@@ -537,6 +557,55 @@ export default function CraftOCRPage() {
                 English
               </label>
             </div>
+          </div>
+
+          <div className="rounded-xl border border-blue-100 bg-blue-50/20 p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-semibold text-gray-800">Advanced • CRAFT</h2>
+                <p className="text-xs text-gray-500">ปรับความละเอียดก่อนส่งหา backend (default 1920px)</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAdvanced((prev) => !prev)}
+                className="text-xs font-medium text-blue-600 hover:text-blue-700"
+              >
+                {showAdvanced ? "ซ่อน" : "แสดง"}
+              </button>
+            </div>
+
+            {showAdvanced && (
+              <div className="mt-4 space-y-4">
+                <div>
+                  <label className="text-xs font-medium text-gray-600">
+                    ขนาดด้านยาว (Long Size)
+                  </label>
+                  <select
+                    value={craftLongSize}
+                    onChange={(event) => setCraftLongSize(parseInt(event.target.value, 10))}
+                    className="mt-1 w-full rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm text-gray-700 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                  >
+                    {craftLongSizeOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-xs text-gray-500">
+                    ค่ายิ่งมาก รายละเอียดดียิ่งขึ้นแต่ใช้เวลามากขึ้น โดยเฉพาะบน CPU/M-series
+                  </p>
+                </div>
+                <label className="flex items-center gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={craftUseRefiner}
+                    onChange={(event) => setCraftUseRefiner(event.target.checked)}
+                    className="h-4 w-4 rounded border-blue-300 text-blue-600"
+                  />
+                  เปิด Refiner เพื่อเชื่อมกรอบข้อความให้เนียนขึ้น
+                </label>
+              </div>
+            )}
           </div>
 
           <div className="rounded-xl border border-gray-200 bg-white p-5">
@@ -787,6 +856,16 @@ export default function CraftOCRPage() {
                   <p className="text-xs text-gray-500">
                     💡 เคล็ดลับ: ใช้ 2 spaces หรือมากกว่าเพื่อแยกคอลัมน์ในตาราง
                   </p>
+                  {ocrResult.craft_settings && (
+                    <div className="flex flex-wrap gap-2 text-xs text-gray-500">
+                      <span className="inline-flex items-center gap-1 rounded-full border border-blue-100 bg-blue-50 px-2 py-0.5">
+                        CRAFT {ocrResult.craft_settings.long_size}px
+                      </span>
+                      <span className="inline-flex items-center gap-1 rounded-full border border-blue-100 bg-blue-50 px-2 py-0.5">
+                        Refiner {ocrResult.craft_settings.refiner ? "เปิด" : "ปิด"}
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {displayMode === "visual" ? (

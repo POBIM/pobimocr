@@ -1,0 +1,9 @@
+# NVIDIA CUDA (RTX GPU) specific dependencies
+-r requirements-base.txt
+
+# PyTorch with CUDA support
+torch>=2.1.0
+torchvision>=0.16.0
+
+# CUDA-optimized quantization
+bitsandbytes>=0.42.0
