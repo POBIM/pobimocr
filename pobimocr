@@ -285,16 +285,48 @@ cmd_setup() {
     print_info "Creating Python 3.12 virtual environment..."
     $PYTHON_CMD -m venv venv
 
-    if [ ! -d "venv" ]; then
+    if [ $? -ne 0 ]; then
         print_error "Failed to create virtual environment!"
+        print_info "Make sure python3.12-venv is installed:"
+        if [[ "$(uname -s)" == "Darwin" ]]; then
+            print_info "  brew install python@3.12"
+        else
+            print_info "  sudo apt-get install python3.12-venv"
+        fi
+        exit 1
+    fi
+
+    if [ ! -d "venv" ] || [ ! -f "venv/bin/activate" ]; then
+        print_error "Virtual environment was not created properly!"
+        print_info "venv directory exists: $([ -d 'venv' ] && echo 'yes' || echo 'no')"
+        print_info "activate script exists: $([ -f 'venv/bin/activate' ] && echo 'yes' || echo 'no')"
         exit 1
     fi
 
     print_info "Activating virtual environment..."
     source venv/bin/activate
 
+    if [ $? -ne 0 ]; then
+        print_error "Failed to activate virtual environment!"
+        exit 1
+    fi
+
     print_info "Upgrading pip..."
+    if ! command -v pip &> /dev/null; then
+        print_error "pip command not found after activating venv!"
+        print_info "Virtual environment may not be activated properly"
+        deactivate 2>/dev/null || true
+        exit 1
+    fi
+
     pip install --upgrade pip setuptools wheel --quiet
+
+    if [ $? -ne 0 ]; then
+        print_error "Failed to upgrade pip!"
+        deactivate
+        exit 1
+    fi
+
     print_success "Pip upgraded"
 
     # Step 5: Install requirements based on hardware
@@ -317,7 +349,7 @@ cmd_setup() {
 
     if [ $? -ne 0 ]; then
         print_error "Failed to install dependencies!"
-        deactivate
+        deactivate 2>/dev/null || true
         exit 1
     fi
 
@@ -380,7 +412,7 @@ EOF
         fi
     fi
 
-    deactivate
+    deactivate 2>/dev/null || true
     print_success "Backend setup complete!"
 
     cd "$SCRIPT_DIR"
