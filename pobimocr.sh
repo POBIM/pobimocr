@@ -3,13 +3,18 @@
 # POBIMORC CLI - OCR System Management Tool
 # Single command to manage the entire OCR system
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/ocr-backend"
 FRONTEND_DIR="$SCRIPT_DIR/ocr-browser"
 LOGS_DIR="$SCRIPT_DIR/logs"
 BACKEND_PID_FILE="$SCRIPT_DIR/.backend.pid"
 FRONTEND_PID_FILE="$SCRIPT_DIR/.frontend.pid"
+PYTHON_CMD=""
+PYTHON_VERSION=""
+MIN_PYTHON_MAJOR=3
+MIN_PYTHON_MINOR=10
+PYTHON_CANDIDATES=("python3.12" "python3.11" "python3.10" "python3")
 
 # Colors
 RED='\033[0;31m'
@@ -51,6 +56,38 @@ print_error() {
 
 print_step() {
     echo -e "${MAGENTA}➜${NC} $1"
+}
+
+ensure_python_command() {
+    if [ -n "$PYTHON_CMD" ]; then
+        return
+    fi
+
+    for candidate in "${PYTHON_CANDIDATES[@]}"; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            local version_output
+            version_output=$("$candidate" --version 2>&1 | awk '{print $2}')
+            local major=${version_output%%.*}
+            local minor=${version_output#*.}
+            minor=${minor%%.*}
+
+            if [ "$major" -gt "$MIN_PYTHON_MAJOR" ] || { [ "$major" -eq "$MIN_PYTHON_MAJOR" ] && [ "$minor" -ge "$MIN_PYTHON_MINOR" ]; }; then
+                PYTHON_CMD="$candidate"
+                PYTHON_VERSION="$version_output"
+                print_success "Using Python $PYTHON_VERSION ($PYTHON_CMD)"
+                return
+            fi
+        fi
+    done
+
+    print_error "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ not found!"
+    print_info "Install Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ (e.g. sudo apt install python3.12 python3.12-venv python3.12-dev)"
+    exit 1
+}
+
+# Ensure logs dir
+ensure_logs_dir() {
+    mkdir -p "$LOGS_DIR"
 }
 
 # Check if services are running
@@ -130,25 +167,9 @@ cmd_setup() {
     print_step "Starting system setup..."
     echo ""
     
-    # Check Python 3.12
-    print_step "Checking Python 3.12..."
-    
-    # Try to find Python 3.12 in different locations
-    PYTHON_CMD=""
-    if command -v python3.12 &> /dev/null; then
-        PYTHON_CMD="python3.12"
-    elif [ -f /usr/bin/python3.12 ]; then
-        PYTHON_CMD="/usr/bin/python3.12"
-    fi
-    
-    if [ -z "$PYTHON_CMD" ]; then
-        print_error "Python 3.12 not found!"
-        print_info "Install with: sudo apt-get install python3.12 python3.12-venv python3.12-dev"
-        exit 1
-    fi
-    
-    PYTHON_VERSION=$($PYTHON_CMD --version 2>&1)
-    print_success "Found $PYTHON_VERSION at $(which $PYTHON_CMD || echo $PYTHON_CMD)"
+    # Check Python
+    print_step "Checking Python interpreter..."
+    ensure_python_command
     
     # Check if running in conda and warn
     if [ ! -z "$CONDA_DEFAULT_ENV" ]; then
@@ -199,7 +220,7 @@ cmd_setup() {
     source venv/bin/activate
     
     print_info "Upgrading pip..."
-    pip install --upgrade pip setuptools wheel
+    python -m pip install --upgrade pip setuptools wheel
     
     if [ $? -ne 0 ]; then
         print_error "Failed to upgrade pip!"
@@ -210,7 +231,7 @@ cmd_setup() {
     print_success "Pip upgraded successfully"
     
     print_info "Installing Python dependencies (this may take a while)..."
-    pip install -r requirements.txt
+    python -m pip install -r requirements.txt
     
     if [ $? -ne 0 ]; then
         print_error "Failed to install dependencies!"
@@ -219,16 +240,23 @@ cmd_setup() {
         exit 1
     fi
     
+    # Determine site-packages path for portable installations
+    SITE_PACKAGES_PATH=$(python <<'EOF'
+import sysconfig
+print(sysconfig.get_paths().get("purelib", ""))
+EOF
+)
+    
     # Fix craft-text-detector compatibility with torchvision
     print_info "Applying CRAFT compatibility fix for torchvision..."
-    CRAFT_VGG_FILE="venv/lib/python3.12/site-packages/craft_text_detector/models/basenet/vgg16_bn.py"
+    CRAFT_VGG_FILE="$SITE_PACKAGES_PATH/craft_text_detector/models/basenet/vgg16_bn.py"
     
     if [ -f "$CRAFT_VGG_FILE" ]; then
         print_info "Backing up original vgg16_bn.py..."
         cp "$CRAFT_VGG_FILE" "$CRAFT_VGG_FILE.backup"
         
         print_info "Patching vgg16_bn.py for torchvision compatibility..."
-        python3.12 << 'EOF'
+        python << 'EOF'
 import sys
 
 vgg_file = "venv/lib/python3.12/site-packages/craft_text_detector/models/basenet/vgg16_bn.py"

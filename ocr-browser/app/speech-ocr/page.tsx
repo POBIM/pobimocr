@@ -53,6 +53,18 @@ export default function SpeechOCRPage() {
     { value: "ko", label: "한국어" },
   ];
 
+  const formatTimestamp = (value?: number) => {
+    if (typeof value !== "number" || Number.isNaN(value) || !Number.isFinite(value)) {
+      return "0:00";
+    }
+    const totalSeconds = Math.max(0, value);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = Math.floor(totalSeconds % 60);
+    const millis = Math.round((totalSeconds - Math.floor(totalSeconds)) * 10);
+    const paddedSeconds = seconds.toString().padStart(2, "0");
+    return millis > 0 ? `${minutes}:${paddedSeconds}.${millis}` : `${minutes}:${paddedSeconds}`;
+  };
+
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -129,9 +141,9 @@ export default function SpeechOCRPage() {
                   success: true,
                   text: fullText,
                   language: detectedLang,
-                  segments: segments.map((text, idx) => ({
-                    start: idx,
-                    end: idx + 1,
+                  segments: segments.map((text) => ({
+                    start: NaN,
+                    end: NaN,
                     text,
                   })),
                   total_segments: segments.length,
@@ -147,9 +159,9 @@ export default function SpeechOCRPage() {
               success: true,
               text: fullText,
               language: detectedLang,
-              segments: segments.map((text, idx) => ({
-                start: idx,
-                end: idx + 1,
+              segments: segments.map((text) => ({
+                start: NaN,
+                end: NaN,
                 text,
               })),
               total_segments: segments.length,
@@ -428,12 +440,25 @@ export default function SpeechOCRPage() {
                     แสดงทั้งหมด {transcribeResult.segments.length} ส่วน
                   </summary>
                   <div className="mt-3 space-y-2">
-                    {transcribeResult.segments.map((seg, idx) => (
-                      <div key={idx} className="rounded-lg bg-gray-100 p-3">
-                        <p className="text-xs text-gray-500">ส่วนที่ {idx + 1}</p>
-                        <p className="mt-1 text-sm text-gray-800">{seg.text}</p>
-                      </div>
-                    ))}
+                    {transcribeResult.segments.map((seg, idx) => {
+                      const hasRange =
+                        typeof seg.start === "number" && typeof seg.end === "number" && seg.end >= seg.start;
+                      const duration = hasRange ? (seg.end - seg.start).toFixed(1) : null;
+                      return (
+                        <div key={idx} className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                          <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs text-gray-500">
+                            <span className="font-semibold text-gray-700">ช่วงที่ {idx + 1}</span>
+                            {hasRange && (
+                              <span className="font-mono text-gray-600">
+                                {formatTimestamp(seg.start)} - {formatTimestamp(seg.end)}
+                                {duration ? ` (${duration}s)` : ""}
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-2 text-sm text-gray-800">{seg.text}</p>
+                        </div>
+                      );
+                    })}
                   </div>
                 </details>
               )}

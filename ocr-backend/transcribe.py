@@ -224,9 +224,9 @@ def _run_whisper_transcription(model, file_path, transcribe_params):
     """
     # ลด memory usage สำหรับ large models
     if not transcribe_params.get('beam_size'):
-        transcribe_params['beam_size'] = 1  # ลด beam search memory
+        transcribe_params['beam_size'] = 16  # เพิ่ม beam search ตามคำขอเพื่อคุณภาพ
     if not transcribe_params.get('best_of'):
-        transcribe_params['best_of'] = 1
+        transcribe_params['best_of'] = 16
 
     logger.info(f"Calling model.transcribe with params: {transcribe_params}")
     segments, info = model.transcribe(file_path, **transcribe_params)
