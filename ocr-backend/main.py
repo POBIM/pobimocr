@@ -1,6 +1,6 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import cv2
 import numpy as np
 from craft_text_detector import Craft
@@ -10,8 +10,13 @@ from PIL import Image
 import logging
 import json
 import os
+import tempfile
 from typing import Optional
+import subprocess
+import sys
 from qwen_corrector import get_corrector, release_corrector, RELEASE_AFTER_USE
+from device_info import get_device_info
+import transcribe
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -169,50 +174,6 @@ def get_craft_detector(long_size=None, refiner=None):
     return craft_detectors[key]
 
 
-def get_device_info():
-    """Detect and return device information (CUDA, MPS, or CPU)"""
-    import torch
-    import platform
-
-    device_info = {
-        "type": "cpu",
-        "name": "CPU",
-        "cuda_available": False,
-        "mps_available": False,
-        "use_gpu": False,
-        "craft_supports_cuda": False,
-        "easyocr_gpu": False,
-    }
-
-    # Check CUDA (NVIDIA GPU)
-    if torch.cuda.is_available():
-        device_info["type"] = "cuda"
-        device_info["name"] = torch.cuda.get_device_name(0)
-        device_info["cuda_available"] = True
-        device_info["use_gpu"] = True
-        device_info["craft_supports_cuda"] = True
-        device_info["easyocr_gpu"] = True
-        logger.info(f"✓ CUDA GPU detected: {device_info['name']}")
-        logger.info(f"  CUDA version: {torch.version.cuda}")
-
-    # Check MPS (Apple Silicon)
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        device_info["type"] = "mps"
-        device_info["name"] = f"Apple Silicon ({platform.machine()})"
-        device_info["mps_available"] = True
-        device_info["use_gpu"] = True
-        device_info["easyocr_gpu"] = True
-        logger.info(f"✓ MPS (Metal) GPU detected: {device_info['name']}")
-        logger.info(f"  PyTorch MPS backend enabled")
-        logger.info("CRAFT currently supports CUDA only, falling back to CPU for detector")
-
-    else:
-        logger.info(f"⚠ No GPU detected, using CPU")
-        logger.info(f"  Platform: {platform.machine()}")
-
-    return device_info
-
-
 @app.on_event("startup")
 async def startup_event():
     """Initialize models on startup"""
@@ -247,6 +208,11 @@ async def startup_event():
     logger.info("Pre-loading default EasyOCR reader for Thai and English...")
     ocr_readers['th,en'] = easyocr.Reader(['th', 'en'], gpu=easyocr_gpu)
     logger.info("Default EasyOCR reader initialized successfully")
+
+    # Set device config for transcribe module
+    logger.info("Initializing speech-to-text module...")
+    transcribe.set_device_config(device_config)
+    logger.info("Speech-to-text module initialized")
 
 
 def get_ocr_reader(languages):
@@ -624,6 +590,260 @@ async def process_ocr_simple(
     except Exception as e:
         logger.error(f"OCR processing error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"OCR processing failed: {str(e)}")
+
+
+# =====================================================================
+# Speech-to-Text Endpoints
+# =====================================================================
+
+ALLOWED_AUDIO_EXTENSIONS = {'mp3', 'wav', 'm4a', 'flac', 'mp4', 'avi', 'mov', 'mkv'}
+TRANSCRIBE_WORKER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcribe_worker.py")
+
+
+def _build_worker_cmd(mode, file_path, model_size, language, initial_prompt=None, chunk_duration=0):
+    cmd = [
+        sys.executable,
+        TRANSCRIBE_WORKER_PATH,
+        "--mode",
+        mode,
+        "--file",
+        file_path,
+        "--model-size",
+        model_size,
+        "--language",
+        language,
+    ]
+    if initial_prompt:
+        cmd.extend(["--initial-prompt", initial_prompt])
+    if chunk_duration:
+        cmd.extend(["--chunk-duration", str(chunk_duration)])
+    return cmd
+
+
+def _run_worker_json(file_path, model_size, language, initial_prompt=None):
+    cmd = _build_worker_cmd("json", file_path, model_size, language, initial_prompt=initial_prompt)
+    logger.info(f"Launching transcription worker: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "transcription worker failed"
+        raise RuntimeError(detail)
+
+    stdout = result.stdout.strip()
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError("Invalid JSON payload from transcription worker")
+
+    if not payload.get("success"):
+        raise RuntimeError(payload.get("error") or "transcription worker returned failure")
+
+    return payload
+
+
+def _stream_worker_output(file_path, model_size, language, chunk_duration=0, initial_prompt=None):
+    cmd = _build_worker_cmd(
+        "stream",
+        file_path,
+        model_size,
+        language,
+        initial_prompt=initial_prompt,
+        chunk_duration=chunk_duration,
+    )
+    logger.info(f"Launching streaming transcription worker: {' '.join(cmd)}")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+
+    def iterator():
+        try:
+            assert proc.stdout is not None
+            for line in iter(proc.stdout.readline, ""):
+                yield line
+
+            proc.wait()
+            if proc.returncode != 0:
+                stderr_data = proc.stderr.read().strip() if proc.stderr else ""
+                message = stderr_data or "transcription worker exited with error"
+                logger.error(f"Transcription worker failed: {message}")
+                yield f"STATUS: เกิดข้อผิดพลาด: {message}\n"
+                yield "DONE\n"
+        finally:
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
+            if proc.poll() is None:
+                proc.terminate()
+
+    return iterator()
+
+
+def allowed_audio_file(filename: str) -> bool:
+    """Check if the file extension is allowed for audio/video"""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_AUDIO_EXTENSIONS
+
+
+@app.post("/transcribe")
+async def transcribe_audio_endpoint(
+    file: UploadFile = File(...),
+    model_size: str = Form("base"),
+    language: str = Form("th"),
+    initial_prompt: Optional[str] = Form(None)
+):
+    """
+    Transcribe audio/video file to text
+
+    Args:
+        file: Audio/Video file (mp3, wav, m4a, flac, mp4, avi, mov, mkv)
+        model_size: Whisper model size (tiny, base, small, medium, large)
+        language: Language code (th, en, auto for auto-detect)
+        initial_prompt: Optional prompt to guide transcription
+
+    Returns:
+        JSON with transcribed text, language, and segments
+    """
+    try:
+        # Validate file type
+        if not allowed_audio_file(file.filename):
+            raise HTTPException(
+                status_code=400,
+                detail=f"File type not allowed. Supported: {', '.join(ALLOWED_AUDIO_EXTENSIONS)}"
+            )
+
+        logger.info(f"Transcribing file: {file.filename} (model: {model_size}, lang: {language})")
+
+        # Save uploaded file temporarily
+        suffix = os.path.splitext(file.filename)[1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+            contents = await file.read()
+            temp_file.write(contents)
+            temp_file_path = temp_file.name
+
+        try:
+            result = _run_worker_json(
+                temp_file_path,
+                model_size=model_size,
+                language=language,
+                initial_prompt=initial_prompt,
+            )
+            return JSONResponse(result)
+        except RuntimeError as worker_error:
+            logger.error(f"Transcription worker error: {worker_error}")
+            raise HTTPException(status_code=500, detail=f"Transcription failed: {worker_error}")
+        finally:
+            # Clean up temporary file
+            try:
+                if os.path.exists(temp_file_path):
+                    os.unlink(temp_file_path)
+            except Exception as e:
+                logger.warning(f"Failed to delete temp file: {e}")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Transcription error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+
+@app.post("/transcribe/stream")
+async def transcribe_stream_endpoint(
+    file: UploadFile = File(...),
+    model_size: str = Form("base"),
+    language: str = Form("th"),
+    chunk_duration: int = Form(0),
+    initial_prompt: Optional[str] = Form(None)
+):
+    """
+    Stream transcription progress and segments for better UX
+
+    Args:
+        file: Audio/Video file
+        model_size: Whisper model size
+        language: Language code
+        chunk_duration: Duration of each chunk in seconds (0 = disabled)
+        initial_prompt: Optional prompt to guide transcription
+
+    Returns:
+        Stream of progress updates and transcript segments
+    """
+    try:
+        # Validate file type
+        if not allowed_audio_file(file.filename):
+            raise HTTPException(
+                status_code=400,
+                detail=f"File type not allowed. Supported: {', '.join(ALLOWED_AUDIO_EXTENSIONS)}"
+            )
+
+        logger.info(f"Streaming transcription: {file.filename} (model: {model_size}, lang: {language})")
+
+        # Save uploaded file temporarily
+        suffix = os.path.splitext(file.filename)[1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+            contents = await file.read()
+            temp_file.write(contents)
+            temp_file_path = temp_file.name
+
+        def generate():
+            try:
+                # Stream transcription
+                worker_stream = _stream_worker_output(
+                    temp_file_path,
+                    model_size=model_size,
+                    language=language,
+                    chunk_duration=chunk_duration,
+                    initial_prompt=initial_prompt,
+                )
+                for chunk in worker_stream:
+                    yield chunk
+
+            finally:
+                # Clean up temp file
+                try:
+                    if os.path.exists(temp_file_path):
+                        os.unlink(temp_file_path)
+                except Exception as e:
+                    logger.warning(f"Failed to delete temp file: {e}")
+
+        return StreamingResponse(
+            generate(),
+            media_type='text/plain; charset=utf-8',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no',
+                'Connection': 'keep-alive',
+                'Transfer-Encoding': 'chunked'
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Stream transcription error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Stream transcription failed: {str(e)}")
+
+
+@app.get("/transcribe/models")
+async def get_transcribe_models():
+    """Get available Whisper models"""
+    return JSONResponse({
+        'models': transcribe.get_available_models()
+    })
+
+
+@app.get("/transcribe/languages")
+async def get_transcribe_languages():
+    """Get available languages for transcription"""
+    return JSONResponse({
+        'languages': transcribe.get_available_languages()
+    })
 
 
 if __name__ == "__main__":

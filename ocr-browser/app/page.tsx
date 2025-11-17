@@ -10,7 +10,7 @@ export default function Home() {
         </p>
       </section>
 
-      <section className="grid gap-5 sm:grid-cols-2 max-w-4xl">
+      <section className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 max-w-6xl">
         <Link
           href="/browser-ocr"
           className="group rounded-2xl border border-gray-200 bg-gradient-to-br from-blue-50 to-indigo-50 p-6 transition hover:shadow-md hover:border-blue-200"
@@ -36,6 +36,22 @@ export default function Home() {
             ใช้ CRAFT + EasyOCR ผ่าน Python backend สำหรับเอกสารซับซ้อน
           </p>
           <div className="mt-4 inline-flex items-center text-xs text-purple-600 font-medium">
+            เริ่มใช้งาน
+            <svg className="ml-1 h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          </div>
+        </Link>
+
+        <Link
+          href="/speech-ocr"
+          className="group rounded-2xl border border-gray-200 bg-gradient-to-br from-green-50 to-teal-50 p-6 transition hover:shadow-md hover:border-green-200"
+        >
+          <h2 className="text-lg font-semibold text-gray-800 group-hover:text-green-700 transition">Speech-to-Text</h2>
+          <p className="mt-3 text-sm text-gray-600 leading-relaxed">
+            แปลงเสียงและวิดีโอเป็นข้อความด้วย OpenAI Whisper
+          </p>
+          <div className="mt-4 inline-flex items-center text-xs text-green-600 font-medium">
             เริ่มใช้งาน
             <svg className="ml-1 h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
