@@ -34,6 +34,9 @@ export default function SpeechOCRPage() {
   const [language, setLanguage] = useState<string>("th");
   const [progress, setProgress] = useState<string[]>([]);
   const [streamMode, setStreamMode] = useState<boolean>(true); // เปิด stream mode เพื่อ memory optimization
+  const DEFAULT_GUIDANCE =
+    "ถอดเสียงบทสนทนาภาษาไทยให้ชัดเจน ใช้เครื่องหมายวรรคตอนไทยและรักษาชื่อเฉพาะที่เกี่ยวกับสภาพอากาศ เมืองเชียงใหม่ และคำว่าพายุ/ความกดอากาศ";
+  const [initialPrompt, setInitialPrompt] = useState<string>(DEFAULT_GUIDANCE);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const models = [
@@ -88,6 +91,9 @@ export default function SpeechOCRPage() {
       formData.append("file", selectedFile);
       formData.append("model_size", modelSize);
       formData.append("language", language);
+      if (initialPrompt.trim().length > 0) {
+        formData.append("initial_prompt", initialPrompt.trim());
+      }
 
       if (streamMode) {
         // Stream mode - แสดงความคืบหน้า
@@ -117,6 +123,7 @@ export default function SpeechOCRPage() {
           let buffer = "";
           const segments: string[] = [];
           let detectedLang = "unknown";
+          let resultCommitted = false;
 
           while (true) {
             const { done, value } = await reader.read();
@@ -126,16 +133,30 @@ export default function SpeechOCRPage() {
             const lines = buffer.split("\n");
             buffer = lines.pop() || "";
 
-            for (const line of lines) {
+            for (const raw of lines) {
+              const line = raw.trimEnd();
+              if (!line) continue;
+
               if (line.startsWith("STATUS:")) {
                 const status = line.substring(7).trim();
                 setProgress((prev) => [...prev, status]);
-              } else if (line.startsWith("LANG:")) {
+                continue;
+              }
+
+              if (line.startsWith("LANG:")) {
                 detectedLang = line.substring(5).trim();
-              } else if (line.startsWith("SEG:")) {
+                continue;
+              }
+
+              if (line.startsWith("SEG:")) {
                 const seg = line.substring(4).trim();
-                segments.push(seg);
-              } else if (line === "DONE") {
+                if (seg) {
+                  segments.push(seg);
+                }
+                continue;
+              }
+
+              if (line.trim() === "DONE") {
                 const fullText = segments.join(" ");
                 setTranscribeResult({
                   success: true,
@@ -148,12 +169,13 @@ export default function SpeechOCRPage() {
                   })),
                   total_segments: segments.length,
                 });
+                resultCommitted = true;
               }
             }
           }
 
           // If we got here but no result, check if we have segments
-          if (!transcribeResult && segments.length > 0) {
+          if (!resultCommitted && segments.length > 0) {
             const fullText = segments.join(" ");
             setTranscribeResult({
               success: true,
@@ -338,6 +360,23 @@ export default function SpeechOCRPage() {
                     </option>
                   ))}
                 </select>
+              </div>
+
+              {/* Guided Prompt */}
+              <div>
+                <label className="mb-2 block text-sm font-medium text-gray-700">
+                  ข้อความชี้นำ (Guided Prompt)
+                </label>
+                <textarea
+                  value={initialPrompt}
+                  onChange={(event) => setInitialPrompt(event.target.value)}
+                  rows={3}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  placeholder="ระบุบริบทหรือคำเฉพาะที่ต้องการให้โมเดลยึดตาม"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  เติมบริบทให้โมเดล (เช่น สถานที่ เหตุการณ์ หรือชื่อคน) เพื่อเพิ่มความแม่นยำ
+                </p>
               </div>
 
               {/* Stream Mode Toggle */}

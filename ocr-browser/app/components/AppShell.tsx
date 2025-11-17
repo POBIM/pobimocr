@@ -8,6 +8,7 @@ const navItems = [
   { name: "Overview", href: "/" },
   { name: "Browser Engine", href: "/browser-ocr" },
   { name: "CRAFT Engine", href: "/craft-ocr" },
+  { name: "Speech-to-Text", href: "/speech-ocr" },
   { name: "API Docs", href: "http://localhost:8005/docs", external: true },
 ];
 

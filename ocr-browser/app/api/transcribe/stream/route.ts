@@ -4,6 +4,8 @@ import { Agent } from "undici";
 export const runtime = "nodejs";
 
 const PYTHON_API_URL = process.env.PYTHON_API_URL || "http://localhost:8005";
+const DEFAULT_GUIDED_PROMPT =
+  "ถอดเสียงบทสนทนาภาษาไทยให้ชัดเจน ใช้เครื่องหมายวรรคตอนไทยและรักษาชื่อเฉพาะที่เกี่ยวกับสภาพอากาศ เมืองเชียงใหม่ และคำว่าพายุ/ความกดอากาศ";
 const pythonApiAgent = new Agent({
   headersTimeout: 0,
   bodyTimeout: 0,
@@ -18,7 +20,10 @@ export async function POST(request: NextRequest) {
     const modelSize = (formData.get("model_size") as string) ?? "base";
     const language = (formData.get("language") as string) ?? "th";
     const chunkDuration = (formData.get("chunk_duration") as string) ?? "0";
-    const initialPrompt = formData.get("initial_prompt") as string | null;
+    let initialPrompt = formData.get("initial_prompt") as string | null;
+    if (!initialPrompt || initialPrompt.trim().length === 0) {
+      initialPrompt = DEFAULT_GUIDED_PROMPT;
+    }
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "ต้องอัพโหลดไฟล์ก่อน" }, { status: 400 });
@@ -29,9 +34,7 @@ export async function POST(request: NextRequest) {
     pythonFormData.append("model_size", modelSize);
     pythonFormData.append("language", language);
     pythonFormData.append("chunk_duration", chunkDuration);
-    if (initialPrompt) {
-      pythonFormData.append("initial_prompt", initialPrompt);
-    }
+    pythonFormData.append("initial_prompt", initialPrompt);
 
     const response = await fetch(`${PYTHON_API_URL}/transcribe/stream`, {
       method: "POST",
